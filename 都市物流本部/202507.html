@@ -1,0 +1,477 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8" />
+  <title>地域物流本部：配車区分の件数推移</title>
+  <script src="https://cdn.plot.ly/plotly-2.32.0.min.js"></script>
+  <style>
+    :root { --gap: 16px; }
+    body {
+      margin: 0; padding: 24px;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI",
+                   "Meiryo", "Yu Gothic", "Noto Sans JP", sans-serif;
+      background:#fafafa; color:#222;
+    }
+    h1 { margin: 0 0 12px; font-size: 22px; }
+    .sub { color:#666; margin-bottom: 18px; font-size: 14px; }
+    .grid {
+      display:grid;
+      grid-template-columns: 1fr 1fr;
+      grid-auto-rows: minmax(360px, auto);
+      gap: var(--gap);
+    }
+    .card {
+      background:#fff; border-radius:14px; padding:14px 14px 6px;
+      box-shadow: 0 6px 16px rgba(0,0,0,.07);
+    }
+    .full { grid-column: 1 / -1; }
+    .row { display:flex; align-items:center; gap:10px; margin-bottom:6px; }
+    select {
+      border:1px solid #ddd; border-radius:10px; padding:6px 10px; background:#fff;
+      font-size: 13px;
+    }
+    .foot { font-size:12px; color:#777; margin-top:10px; }
+    .ok { color:#2ca02c; }
+    .warn { color:#d62728; }
+  </style>
+</head>
+<body>
+  <h1 id="pageTitle">地域物流本部：配車区分の件数推移</h1>
+  <div class="sub">表示はすべて「<b>パートナー／協力会社／雇用</b>」に統一しています。</div>
+
+  <div class="grid">
+    <!-- 積み上げ（切替付き） -->
+    <div class="card">
+      <div class="row">
+        <strong>積み上げ表示：</strong>
+        <select id="stackedMode">
+          <option value="monthly">月別総数（前月→当月）</option>
+          <option value="startEnd" selected>開始/終了（区分別）＋純増</option>
+          <option value="netByCat">純増（区分別の寄与）</option>
+        </select>
+      </div>
+      <div id="stacked"></div>
+    </div>
+
+    <!-- ウォーターフォール（切替付き） -->
+    <div class="card">
+      <div class="row">
+        <strong>ウォーターフォール表示：</strong>
+        <select id="wfMode">
+          <option value="delta">増減フォーカス（0基準）</option>
+          <option value="total">総数ベース</option>
+          <option value="contrib" selected>区分別寄与（パートナー／協力会社／雇用）</option>
+        </select>
+      </div>
+      <div id="waterfall"></div>
+    </div>
+
+    <!-- サンキー -->
+    <div class="card full">
+      <div id="sankey"></div>
+      <div class="foot">
+        ※ このサンキー図の数値は<b>入替に関わった件数のみ</b>を表します（各月の総数とは一致しません）。<br/>
+        ラベル順序は<b>P→S→E</b>で固定しています（左右・上下とも）。
+      </div>
+      <div id="sankeyDetail" class="foot"></div>
+    </div>
+  </div>
+
+  <div id="footnote" class="foot"></div>
+  <div id="consistency" class="foot"></div>
+
+<script>
+  // =============================================================
+  // ①【毎月ここだけ編集】—— 設定（CONFIG）
+  // =============================================================
+
+ 	
+const CONFIG = {
+  title: "都市物流本部（定期）",
+  period: { from: "6月", to: "7月" },
+  monthly: {
+    from: { partner: 505, vendor: 384, employ: 16 }, // 前月
+    to:   { partner: 517,   vendor: 388,   employ: 12 }  // 当月
+  },
+  changes: { startNew: 25, endStop: 13 },
+  // 開始/終了の区分別内訳（合計は上の changes と一致）
+  changesByCat: {
+    start: { partner: 12, vendor: 12, employ: 1 }, // 12+12+1=25
+    end:   { partner: 2,   vendor: 11,   employ: 0 }   // 2+11+0=13
+  },
+  // 入替フロー（P=パートナー, S=協力会社, E=雇用）
+  flows: [
+    { from: "P", to: "P", value: 3 },
+    { from: "P", to: "S", value: 1  },
+    { from: "P", to: "E", value: 0  },
+    { from: "S", to: "P", value: 2  },
+    { from: "S", to: "S", value: 2 },
+    { from: "S", to: "E", value: 0  },
+    { from: "E", to: "P", value: 1  },
+    { from: "E", to: "S", value: 4  },
+    { from: "E", to: "E", value: 0  },
+  ],
+  labels: {
+    partner: "パートナー",
+    vendor:  "協力会社",
+    employ:  "雇用",
+    before:  "入替前",
+    after:   "入替後"
+  }
+};
+  // =============================================================
+  // ② 以下はロジック（編集不要）
+  // =============================================================
+  const jp = CONFIG.labels;
+
+  function number(n){ return n.toLocaleString(); }
+  function total(obj){ return obj.partner + obj.vendor + obj.employ; }
+  const sgn = (n) => (n >= 0 ? `+${n}` : `${n}`);
+
+  function setTitles(){
+    const t = `${CONFIG.title}：配車区分の件数推移（${CONFIG.period.from}→${CONFIG.period.to}）`;
+    document.getElementById("pageTitle").textContent = t;
+    const foot =
+      `データ：${CONFIG.period.from}= ${jp.partner}${number(CONFIG.monthly.from.partner)}／${jp.vendor}${number(CONFIG.monthly.from.vendor)}／${jp.employ}${number(CONFIG.monthly.from.employ)}（計${number(total(CONFIG.monthly.from))}）` +
+      `、${CONFIG.period.to}= ${jp.partner}${number(CONFIG.monthly.to.partner)}／${jp.vendor}${number(CONFIG.monthly.to.vendor)}／${jp.employ}${number(CONFIG.monthly.to.employ)}（計${number(total(CONFIG.monthly.to))}）` +
+      `｜新規開始${number(CONFIG.changes.startNew)}・終了${number(CONFIG.changes.endStop)}｜入替${number(CONFIG.flows.reduce((s,f)=>s+f.value,0))}件`;
+    document.getElementById("footnote").textContent = foot;
+  }
+
+  function consistencyCheck(){
+    const tFrom = total(CONFIG.monthly.from);
+    const tTo   = total(CONFIG.monthly.to);
+    const delta = CONFIG.changes.startNew - CONFIG.changes.endStop;
+
+    const msg = [];
+    const ok  = [];
+
+    if(tFrom + delta === tTo){
+      ok.push("総数：前月 + (新規−終了) = 当月 ✔");
+    } else {
+      msg.push(`総数が一致しません：${number(tFrom)} + (${number(CONFIG.changes.startNew)}−${number(CONFIG.changes.endStop)}) ≠ ${number(tTo)}`);
+    }
+
+    const sumFlows = CONFIG.flows.reduce((s,f)=>s+f.value,0);
+    if(sumFlows > 0){ ok.push(`入替件数 合計：${number(sumFlows)}件`); }
+
+    const cb = CONFIG.changesByCat;
+    if(cb && cb.start && cb.end){
+      const startSum = cb.start.partner + cb.start.vendor + cb.start.employ;
+      const endSum   = cb.end.partner   + cb.end.vendor   + cb.end.employ;
+      if(startSum === CONFIG.changes.startNew && endSum === CONFIG.changes.endStop){
+        ok.push("開始/終了の区分別内訳：合計一致 ✔");
+      } else {
+        msg.push(`内訳不一致：開始=${number(startSum)}（定義=${number(CONFIG.changes.startNew)}）／終了=${number(endSum)}（定義=${number(CONFIG.changes.endStop)}）`);
+      }
+    }
+
+    const el = document.getElementById("consistency");
+    if(msg.length){ el.innerHTML = `<span class='warn'>整合性チェック：${msg.join(" ／ ")}</span>`; }
+    else          { el.innerHTML = `<span class='ok'>整合性チェック：${ok.join(" ／ ")}</span>`; }
+  }
+
+  // ========== 1) 積み上げ棒グラフ ==========
+  function plotStacked(mode = "monthly"){
+    // ---- 月別総数（前月→当月）
+    if(mode === "monthly"){
+      const x = [CONFIG.period.from, CONFIG.period.to];
+      const data = [
+        { name: jp.partner, type: "bar", x, y:[CONFIG.monthly.from.partner, CONFIG.monthly.to.partner], hovertemplate: `%{x}<br>${jp.partner}：%{y:,d}件<extra></extra>` },
+        { name: jp.vendor,  type: "bar", x, y:[CONFIG.monthly.from.vendor,  CONFIG.monthly.to.vendor ], hovertemplate: `%{x}<br>${jp.vendor}：%{y:,d}件<extra></extra>` },
+        { name: jp.employ,  type: "bar", x, y:[CONFIG.monthly.from.employ,  CONFIG.monthly.to.employ ], hovertemplate: `%{x}<br>${jp.employ}：%{y:,d}件<extra></extra>` }
+      ];
+      const layout = {
+        title: "配車区分別の件数推移（積み上げ）",
+        barmode: "stack",
+        legend: {orientation:"h"},
+        margin:{t:50,r:20,b:40,l:60},
+        yaxis:{title:"件数", tickformat:",d"}
+      };
+      Plotly.newPlot("stacked", data, layout, {displayModeBar:false, responsive:true});
+      return;
+    }
+
+    // ---- 開始/終了（区分別）＋右端に純増（開始−終了）1本（符号付き・紫）
+    if(mode === "startEnd"){
+      const cb = CONFIG.changesByCat;
+      if(!cb || !cb.start || !cb.end){
+        Plotly.purge("stacked");
+        document.getElementById("stacked").innerHTML =
+          "<div style='padding:8px;color:#d62728'>changesByCat（開始/終了の区分別内訳）を設定してください。</div>";
+        return;
+      }
+      const x = ["終了（配車区分）", "開始（配車区分）", "純増（開始−終了）"];
+      const totalEnd   = cb.end.partner   + cb.end.vendor   + cb.end.employ;
+      const totalStart = cb.start.partner + cb.start.vendor + cb.start.employ;
+      const net        = totalStart - totalEnd;
+
+      const traces = [
+        { name: jp.partner, type: "bar", x: x.slice(0,2), y:[cb.end.partner,   cb.start.partner],  hovertemplate: `%{x}<br>${jp.partner}：%{y:,d}件<extra></extra>` },
+        { name: jp.vendor,  type: "bar", x: x.slice(0,2), y:[cb.end.vendor,    cb.start.vendor ],  hovertemplate: `%{x}<br>${jp.vendor}：%{y:,d}件<extra></extra>` },
+        { name: jp.employ,  type: "bar", x: x.slice(0,2), y:[cb.end.employ,    cb.start.employ ],  hovertemplate: `%{x}<br>${jp.employ}：%{y:,d}件<extra></extra>` },
+      ];
+
+      // 純増：符号そのまま（正は上、負は下）／紫固定
+      traces.push({
+        name: "純増（開始−終了）",
+        type: "bar",
+        x: ["純増（開始−終了）"],
+        y: [net],                           // ← 符号付き
+        marker: { color: "#9467bd" },       // ← 紫固定
+        text: [ (net>=0? "+" : "") + net.toLocaleString() + "件" ],
+        textposition: "outside",
+        hovertemplate: `純増（開始−終了）<br>%{text}<extra></extra>`,
+        offsetgroup: "net"
+      });
+
+      const layout = {
+        title: "開始/終了（区分別）＋純増",
+        barmode: "stack",
+        legend: {orientation:"h"},
+        margin:{t:50,r:20,b:40,l:60},
+        yaxis:{title:"件数", tickformat:",d", zeroline:true, rangemode:"tozero"},
+        annotations: [
+          { x: x[0], y: totalEnd,   text: totalEnd.toLocaleString(),   showarrow:false, yanchor:"bottom", font:{size:12} },
+          { x: x[1], y: totalStart, text: totalStart.toLocaleString(), showarrow:false, yanchor:"bottom", font:{size:12} }
+        ]
+      };
+      Plotly.newPlot("stacked", traces, layout, {displayModeBar:false, responsive:true});
+      return;
+    }
+
+    // ---- 純増（区分別の寄与）：開始−終了 を P/S/E で相対スタック（±）
+    if(mode === "netByCat"){
+      const cb = CONFIG.changesByCat;
+      if(!cb || !cb.start || !cb.end){
+        Plotly.purge("stacked");
+        document.getElementById("stacked").innerHTML =
+          "<div style='padding:8px;color:#d62728'>changesByCat（開始/終了の区分別内訳）を設定してください。</div>";
+        return;
+      }
+      const x = ["純増（区分別の寄与）"];
+      const dP = cb.start.partner - cb.end.partner;
+      const dS = cb.start.vendor  - cb.end.vendor;
+      const dE = cb.start.employ  - cb.end.employ;
+      const net = dP + dS + dE;
+
+      const data = [
+        { name: jp.partner, type:"bar", x, y:[dP], hovertemplate: `${jp.partner}<br>%{y:+,d}件<extra></extra>` },
+        { name: jp.vendor,  type:"bar", x, y:[dS], hovertemplate: `${jp.vendor}<br>%{y:+,d}件<extra></extra>` },
+        { name: jp.employ,  type:"bar", x, y:[dE], hovertemplate: `${jp.employ}<br>%{y:+,d}件<extra></extra>` },
+      ];
+      const layout = {
+        title: "純増（開始−終了）の区分別寄与",
+        barmode: "relative",
+        legend: {orientation:"h"},
+        margin:{t:50,r:20,b:40,l:60},
+        yaxis:{title:"件数（±）", tickformat:",d", zeroline:true, rangemode:"tozero"},
+        annotations: [
+          { x: x[0], y: net, text: `合計 ${sgn(net)}件`, showarrow:false, yanchor: (net>=0?"bottom":"top"), font:{size:12} }
+        ]
+      };
+      Plotly.newPlot("stacked", data, layout, {displayModeBar:false, responsive:true});
+      return;
+    }
+  }
+
+  // ========== 2) ウォーターフォール（切替対応） ==========
+  function plotWaterfall(mode="delta"){
+    let trace, layout;
+    const dP = CONFIG.monthly.to.partner - CONFIG.monthly.from.partner;
+    const dS = CONFIG.monthly.to.vendor  - CONFIG.monthly.from.vendor;
+    const dE = CONFIG.monthly.to.employ  - CONFIG.monthly.from.employ;
+    const net = dP + dS + dE;
+
+    if(mode === "delta"){
+      trace = {
+        type: "waterfall",
+        measure: ["relative","relative","total"],
+        x: ["新規開始＋"+CONFIG.changes.startNew+"件","終了−"+CONFIG.changes.endStop+"件","純増"+sgn(net)+"件"],
+        y: [ CONFIG.changes.startNew, -CONFIG.changes.endStop, net ],
+        increasing: { marker:{color:"#2ca02c"} },
+        decreasing: { marker:{color:"#d62728"} },
+        totals:     { marker:{color:"#1f77b4"} },
+        textposition: "outside",
+        connector: { line:{color:"rgb(140,140,140)"} },
+        hovertemplate: "%{x}<br>%{y:+,d}件<extra></extra>"
+      };
+      layout = {
+        title: "総案件の増減（変化量にフォーカス）",
+        margin:{t:50,r:20,b:40,l:60},
+        yaxis:{title:"件数（±）", zeroline:true, tickformat:",d"}
+      };
+    }
+
+    if(mode === "total"){
+      const totalFrom = total(CONFIG.monthly.from);
+      const totalTo   = total(CONFIG.monthly.to);
+      trace = {
+        type: "waterfall",
+        measure: ["absolute","relative","relative","total"],
+        x: [CONFIG.period.from+"総数","新規開始","終了",CONFIG.period.to+"総数"],
+        y: [ totalFrom, CONFIG.changes.startNew, -CONFIG.changes.endStop, totalTo ],
+        increasing: { marker:{color:"#2ca02c"} },
+        decreasing: { marker:{color:"#d62728"} },
+        totals:     { marker:{color:"#1f77b4"} },
+        textposition: "outside",
+        connector: { line:{color:"rgb(140,140,140)"} },
+        hovertemplate: "%{x}<br>%{y:+,d}件<extra></extra>"
+      };
+      layout = {
+        title: "総案件数の増減要因（総数ベース）",
+        margin:{t:50,r:20,b:40,l:60},
+        yaxis:{title:"件数", tickformat:",d"}
+      };
+    }
+
+    if(mode === "contrib"){
+      trace = {
+        type: "waterfall",
+        measure: ["relative","relative","relative","total"],
+        x: [`${jp.partner}差分 ${sgn(dP)}件`, `${jp.vendor}差分 ${sgn(dS)}件`, `${jp.employ}差分 ${sgn(dE)}件`, `純増 ${sgn(net)}件`],
+        y: [ dP, dS, dE, net ],
+        increasing: { marker:{color:"#1f77b4"} },
+        totals:     { marker:{color:"#9467bd"} },
+        textposition: "outside",
+        connector: { line:{color:"rgb(140,140,140)"} },
+        hovertemplate: "%{x}<br>%{y:+,d}件<extra></extra>"
+      };
+      layout = {
+        title: "区分別の寄与（パートナー／協力会社／雇用）",
+        margin:{t:50,r:20,b:40,l:60},
+        yaxis:{title:"件数（±）", zeroline:true, tickformat:",d"}
+      };
+    }
+
+    Plotly.newPlot("waterfall", [trace], layout, {displayModeBar:false, responsive:true});
+  }
+
+  // ========== 3) サンキー図（入替前／入替後） ==========
+  function plotSankey(){
+    const fmt = (n) => `${n.toLocaleString()}件`;
+
+    const sumOut = {P:0,S:0,E:0};
+    const sumIn  = {P:0,S:0,E:0};
+    CONFIG.flows.forEach(f => { sumOut[f.from] += f.value; sumIn[f.to] += f.value; });
+
+    const before = [
+      `${jp.partner}（${CONFIG.period.from}）<br>入替対象 ${fmt(sumOut.P)}`,
+      `${jp.vendor}（${CONFIG.period.from}）<br>入替対象 ${fmt(sumOut.S)}`,
+      `${jp.employ}（${CONFIG.period.from}）<br>入替対象 ${fmt(sumOut.E)}`
+    ];
+    const after = [
+      `${jp.partner}（${CONFIG.period.to}）<br>入替後 ${fmt(sumIn.P)}`,
+      `${jp.vendor}（${CONFIG.period.to}）<br>入替後 ${fmt(sumIn.S)}`,
+      `${jp.employ}（${CONFIG.period.to}）<br>入替後 ${fmt(sumIn.E)}`
+    ];
+    const labels = [...before, ...after];
+
+    const idxSrc = {P:0,S:1,E:2};
+    const idxDst = {P:3,S:4,E:5};
+
+    const link = { source:[], target:[], value:[], customdata:[], hovertemplate: "%{customdata}<extra></extra>" };
+    CONFIG.flows.forEach(fw => {
+      const s = idxSrc[fw.from];
+      const d = idxDst[fw.to];
+      link.source.push(s);
+      link.target.push(d);
+      link.value.push(fw.value);
+      const srcLabel = labels[s].replace(/<br>.*/, '');
+      const dstLabel = labels[d].replace(/<br>.*/, '');
+      link.customdata.push(`${jp.before}：${srcLabel}<br>${jp.after}：${dstLabel}<br>${fw.value.toLocaleString()}件`);
+    });
+
+    const nodeHover = [];
+    for (let i = 0; i < 6; i++){
+      const title = labels[i].replace(/<br>/g,'：');
+      let inCount = 0, outCount = 0, inSum = 0, outSum = 0;
+      link.source.forEach((s, k) => { if (s === i){ outCount++; outSum += link.value[k]; }});
+      link.target.forEach((d, k) => { if (d === i){ inCount++;  inSum  += link.value[k]; }});
+      nodeHover.push(
+        `${title}` +
+        `<br>流入：${inCount}本（計 ${inSum.toLocaleString()}件）` +
+        `<br>流出：${outCount}本（計 ${outSum.toLocaleString()}件）`
+      );
+    }
+
+    // 位置固定（上：P / 中：S / 下：E）
+    const xLeft  = 0.10, xRight = 0.90;
+    const yTop   = 0.05, yMid   = 0.50, yBot   = 0.90;
+    const nodeX = [xLeft, xLeft, xLeft, xRight, xRight, xRight];
+    const nodeY = [yTop,  yMid,  yBot,  yTop,   yMid,   yBot ];
+
+    const sankey = [{
+      type: "sankey",
+      arrangement: "fixed",
+      node: {
+        pad:18, thickness:20,
+        line:{color:"black", width:0.5},
+        label: labels,
+        customdata: nodeHover,
+        hovertemplate: "%{customdata}<extra></extra>",
+        x: nodeX, y: nodeY
+      },
+      link: link
+    }];
+
+    const layout = {
+      title: `配車区分入替の流れ（${CONFIG.period.from}→${CONFIG.period.to}）`,
+      margin:{t:50,r:20,b:20,l:20}
+    };
+
+    Plotly.newPlot("sankey", sankey, layout, {displayModeBar:false, responsive:true});
+
+    // 詳細表示（リンクのみ）
+    window.SANKEY_CTX = { labels, link };
+    const detailEl = document.getElementById("sankeyDetail");
+    const sankeyDiv = document.getElementById("sankey");
+    const isLinkPoint = (p) => p && !("label" in p);
+
+    function renderDetail(idx){
+      if(idx == null) { detailEl.textContent = ""; return; }
+      const srcIdx = window.SANKEY_CTX.link.source[idx];
+      const dstIdx = window.SANKEY_CTX.link.target[idx];
+      const val    = window.SANKEY_CTX.link.value[idx];
+      const srcLbl = window.SANKEY_CTX.labels[srcIdx].replace(/<br>.*/, '');
+      const dstLbl = window.SANKEY_CTX.labels[dstIdx].replace(/<br>.*/, '');
+      detailEl.innerHTML = `入替前：${srcLbl}｜入替後：${dstLbl}｜<b>${val.toLocaleString()}件</b>`;
+    }
+
+    sankeyDiv.on("plotly_hover", (e)=>{ const p = e.points && e.points[0]; if (isLinkPoint(p)) renderDetail(p.pointNumber); else renderDetail(null); });
+    sankeyDiv.on("plotly_click", (e)=>{ const p = e.points && e.points[0]; if (isLinkPoint(p)) renderDetail(p.pointNumber); else renderDetail(null); });
+    sankeyDiv.on("plotly_unhover", ()=> renderDetail(null));
+  }
+
+  // ========== 起動 ==========
+  function init(){
+    setTitles();
+    consistencyCheck();
+
+    // 積み上げ（既定：startEnd）
+    const stackedSel = document.getElementById("stackedMode");
+    plotStacked(stackedSel ? stackedSel.value : "startEnd");
+    if(stackedSel){ stackedSel.addEventListener("change", e => plotStacked(e.target.value)); }
+
+    // ウォーターフォール（既定：contrib）
+    const wfSel = document.getElementById("wfMode");
+    plotWaterfall(wfSel ? wfSel.value : "contrib");
+    if(wfSel){ wfSel.addEventListener("change", e => plotWaterfall(e.target.value)); }
+
+    plotSankey();
+
+    // リサイズ
+    const stackedEl = document.getElementById("stacked");
+    const waterfallEl = document.getElementById("waterfall");
+    const sankeyEl = document.getElementById("sankey");
+    window.addEventListener("resize", () => {
+      Plotly.Plots.resize(stackedEl);
+      Plotly.Plots.resize(waterfallEl);
+      Plotly.Plots.resize(sankeyEl);
+    });
+  }
+
+  init();
+</script>
+</body>
+</html>
